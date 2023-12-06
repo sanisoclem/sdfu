@@ -56,6 +56,8 @@
 //! # fn main() {}
 //! ```
 pub mod mathtypes;
+use std::ops::Deref;
+
 use mathtypes::*;
 pub use mathtypes::{Dim2D, Dim3D, Dimension};
 pub mod primitives;
@@ -68,112 +70,135 @@ use ops::*;
 pub mod mods;
 use mods::*;
 
+/// Estimate the normals of this SDF using the default `NormalEstimator`.
+///
+/// `eps` is the amount to change the point by for each sample.
+/// 0.001 is a good default value to try; you will ideally vary this based on distance.
+pub fn estimate_normals<S, T, V: Vec<T>>(sdf: S, eps: T) -> EstimateNormalDefault<T, V, S>
+where
+  S: Clone + Deref,
+  <S as Deref>::Target: SDF<T,V>,
+  CentralDifferenceEstimator<T, V, <V as Vec<T>>::Dimension>: NormalEstimator<T, V>,
+{
+  EstimateNormal::new(sdf, CentralDifferenceEstimator::new(eps))
+}
+
+/// Estimate the normals of this SDF using a fast, `TetrahedralEstimator`. Only
+/// works for 3d SDFs.
+///
+/// `eps` is the amount to change the point by for each sample.
+/// 0.001 is a good default value to try; you will ideally vary this based on distance.
+pub fn estimate_normals_fast<S, T, V: Vec<T>>(sdf: S, eps: T) -> EstimateNormalFast<T, V, S>
+where
+  S: ?Sized + Clone + Deref<Target = dyn SDF<T, V>>,
+  TetrahedralEstimator<T, V>: NormalEstimator<T, V>,
+{
+  EstimateNormal::new(sdf, TetrahedralEstimator::new(eps))
+}
+
 /// The core trait of this crate; an implementor of this trait is able
 /// to take in a vector and return the min distance from that vector to
 /// a distance field.
-pub trait SDF<T, V: Vec<T>>: Copy {
-    /// Get distance from `p` to this SDF.
-    fn dist(&self, p: V) -> T;
+pub trait SDF<T, V: Vec<T>> {
+  /// Get distance from `p` to this SDF.
+  fn dist(&self, p: V) -> T;
 
-    /// Estimate the normals of this SDF using the default `NormalEstimator`.
-    ///
-    /// `eps` is the amount to change the point by for each sample.
-    /// 0.001 is a good default value to try; you will ideally vary this based on distance.
-    fn normals(self, eps: T) -> EstimateNormalDefault<T, V, Self>
-    where
-        CentralDifferenceEstimator<T, V, <V as Vec<T>>::Dimension>: NormalEstimator<T, V>,
-    {
-        EstimateNormal::new(self, CentralDifferenceEstimator::new(eps))
-    }
+  /// Get the union of this SDF and another one()using a standard
+  /// hard minimum, creating a sharp crease at the boundary between the
+  /// two fields.
+  fn union<O: SDF<T, V>>(self, other: O) -> Union<T, Self, O, HardMin<T>>
+  where
+    Self: Sized,
+  {
+    Union::hard(self, other)
+  }
 
-    /// Estimate the normals of this SDF using a fast, `TetrahedralEstimator`. Only
-    /// works for 3d SDFs.
-    ///
-    /// `eps` is the amount to change the point by for each sample.
-    /// 0.001 is a good default value to try; you will ideally vary this based on distance.
-    fn normals_fast(self, eps: T) -> EstimateNormalFast<T, V, Self>
-    where
-        TetrahedralEstimator<T, V>: NormalEstimator<T, V>,
-    {
-        EstimateNormal::new(self, TetrahedralEstimator::new(eps))
-    }
+  /// Get the union of this SDF and another one, blended together
+  /// with a smooth minimum function. This uses a polynomial smooth min
+  /// function by default, and the smoothing factor is controlled by the
+  /// `smoothness` parameter. For even more control, see `union_with`.
+  fn union_smooth<O: SDF<T, V>>(self, other: O, softness: T) -> Union<T, Self, O, PolySmoothMin<T>>
+  where
+    Self: Sized,
+  {
+    Union::smooth(self, other, softness)
+  }
 
-    /// Estimate the normals of this SDF using a provided `NormalEstimator`.
-    fn normals_with<E: NormalEstimator<T, V>>(self, estimator: E) -> EstimateNormal<T, V, Self, E> {
-        EstimateNormal::new(self, estimator)
-    }
+  /// Get the union of this SDF and another one()using a provided
+  /// minimum function. See the documentation of `MinFunction` for more.
+  fn union_with<O: SDF<T, V>, M: MinFunction<T>>(
+    self,
+    other: O,
+    min_function: M,
+  ) -> Union<T, Self, O, M>
+  where
+    Self: Sized,
+  {
+    Union::new(self, other, min_function)
+  }
+  /// Get the subtraction of another SDF from this one. Note that this operation is *not* commutative,
+  /// i.e. `a.subtraction(b) =/= b.subtraction(a)`.
+  fn subtract<O: SDF<T, V>>(self, other: O) -> Subtraction<O, Self>
+  where
+    Self: Sized,
+  {
+    Subtraction::new(other, self)
+  }
 
-    /// Get the union of this SDF and another one()using a standard
-    /// hard minimum, creating a sharp crease at the boundary between the
-    /// two fields.
-    fn union<O: SDF<T, V>>(self, other: O) -> Union<T, Self, O, HardMin<T>> {
-        Union::hard(self, other)
-    }
+  /// Get the intersection of this SDF and another one.
+  fn intersection<O: SDF<T, V>>(self, other: O) -> Intersection<Self, O>
+  where
+    Self: Sized,
+  {
+    Intersection::new(self, other)
+  }
 
-    /// Get the union of this SDF and another one, blended together
-    /// with a smooth minimum function. This uses a polynomial smooth min
-    /// function by default, and the smoothing factor is controlled by the
-    /// `smoothness` parameter. For even more control, see `union_with`.
-    fn union_smooth<O: SDF<T, V>>(
-        self,
-        other: O,
-        softness: T,
-    ) -> Union<T, Self, O, PolySmoothMin<T>> {
-        Union::smooth(self, other, softness)
-    }
+  /// Round the corners of this SDF with a radius.
+  fn round(self, radius: T) -> Round<T, Self>
+  where
+    Self: Sized,
+  {
+    Round::new(self, radius)
+  }
 
-    /// Get the union of this SDF and another one()using a provided
-    /// minimum function. See the documentation of `MinFunction` for more.
-    fn union_with<O: SDF<T, V>, M: MinFunction<T>>(
-        self,
-        other: O,
-        min_function: M,
-    ) -> Union<T, Self, O, M> {
-        Union::new(self, other, min_function)
-    }
-    /// Get the subtraction of another SDF from this one. Note that this operation is *not* commutative,
-    /// i.e. `a.subtraction(b) =/= b.subtraction(a)`.
-    fn subtract<O: SDF<T, V>>(self, other: O) -> Subtraction<O, Self> {
-        Subtraction::new(other, self)
-    }
+  /// Elongate this SDF along one()axis. The elongation is symmetrical about the origin.
+  fn elongate(self, axis: Axis, elongation: T) -> Elongate<T, Self, <V as Vec<T>>::Dimension>
+  where
+    Elongate<T, Self, <V as Vec<T>>::Dimension>: SDF<T, V>,
+    Self: Sized,
+  {
+    Elongate::new(self, axis, elongation)
+  }
 
-    /// Get the intersection of this SDF and another one.
-    fn intersection<O: SDF<T, V>>(self, other: O) -> Intersection<Self, O> {
-        Intersection::new(self, other)
-    }
+  /// Elongate this SDF along one()axis. The elongation is symmetrical about the origin.
+  fn elongate_multi_axis(self, elongation: V) -> ElongateMulti<V, Self, <V as Vec<T>>::Dimension>
+  where
+    ElongateMulti<V, Self, <V as Vec<T>>::Dimension>: SDF<T, V>,
+    Self: Sized,
+  {
+    ElongateMulti::new(self, elongation)
+  }
 
-    /// Round the corners of this SDF with a radius.
-    fn round(self, radius: T) -> Round<T, Self> {
-        Round::new(self, radius)
-    }
+  /// Translate the SDF by a vector.
+  fn translate(self, translation: V) -> Translate<V, Self>
+  where
+    Self: Sized,
+  {
+    Translate::new(self, translation)
+  }
 
-    /// Elongate this SDF along one()axis. The elongation is symmetrical about the origin.
-    fn elongate(self, axis: Axis, elongation: T) -> Elongate<T, Self, <V as Vec<T>>::Dimension>
-    where
-        Elongate<T, Self, <V as Vec<T>>::Dimension>: SDF<T, V>,
-    {
-        Elongate::new(self, axis, elongation)
-    }
-
-    /// Elongate this SDF along one()axis. The elongation is symmetrical about the origin.
-    fn elongate_multi_axis(self, elongation: V) -> ElongateMulti<V, Self, <V as Vec<T>>::Dimension>
-    where
-        ElongateMulti<V, Self, <V as Vec<T>>::Dimension>: SDF<T, V>,
-    {
-        ElongateMulti::new(self, elongation)
-    }
-
-    /// Translate the SDF by a vector.
-    fn translate(self, translation: V) -> Translate<V, Self> {
-        Translate::new(self, translation)
-    }
-
-    /// Rotate the SDF by a rotation.
-    fn rotate<R: Rotation<V>>(self, rotation: R) -> Rotate<R, Self> {
-        Rotate::new(self, rotation)
-    }
-    /// Scale the SDF by a uniform scaling factor.
-    fn scale(self, scaling: T) -> Scale<T, Self> {
-        Scale::new(self, scaling)
-    }
+  /// Rotate the SDF by a rotation.
+  fn rotate<R: Rotation<V>>(self, rotation: R) -> Rotate<R, Self>
+  where
+    Self: Sized,
+  {
+    Rotate::new(self, rotation)
+  }
+  /// Scale the SDF by a uniform scaling factor.
+  fn scale(self, scaling: T) -> Scale<T, Self>
+  where
+    Self: Sized,
+  {
+    Scale::new(self, scaling)
+  }
 }
